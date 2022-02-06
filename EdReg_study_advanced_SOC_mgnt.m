@@ -20,7 +20,7 @@ Emax = 286;         % [MWh]
 Pserv = 100;        % [MW]
 
 % Initialize values
-ELtarget=0.1;   % Starting target of SOC
+ELtarget=0.1;   % Starting target of SOC - 0.1 as we start charging +40%
 etaOW=0.94;     % Fixed efficiency
 dt=1/3600;      % s -> h
 
@@ -29,9 +29,9 @@ deadband=0.05;  %% Hysteresis band
 
 % Test with different datasets 
 %f(:) = 60;   % Fixed 60Hz
-%f(:) = 60 + 0.03 .*randn(length(f),1); % 60Hz mean, 0.05 std
+%f(:) = mean(f) + std(f)/5.*randn(length(f),1); % 60Hz mean, 0.05 std
 
-% Check the width of the peak shaving square wave
+%Check the width of the peak shaving square wave
 % index = find(Pps_AC);
 % width = [];
 % for i = 1:length(index)-1
@@ -91,6 +91,7 @@ ELref(1) = ELtarget;
 ELup(1) = ELtarget + deadband;
 ELdwn(1) = ELtarget - deadband;
 
+%% ZERO RESPONSE ARRAY
 % Creating zero response
 norespflag = sign(dchresponse.*chresponse) == -1;
 percnoresp = sum(norespflag) / T;
@@ -108,7 +109,8 @@ zeroresponse = min(abs([dchresponse'; chresponse'; norespset'])) .* sign(60-f');
 %% DISPATCH SIMULATION
 % hflag signals if the target power request (energy) is above, below or
 % inside the operational area
-hflag = 0;
+hflag = nan(1,T+1)';
+hflag(1) = 0;
 
 for t = 1:T
     if strcmp(OpMode, "EdReg")
@@ -126,19 +128,19 @@ for t = 1:T
     % Pmax is the maximum power while discharging
     Pmax = E(t) * (etaOW/dt);
     
-    if hflag == 0       % Freedom of choice of power 
+    if hflag(t) == 0       % Freedom of choice of power 
         if Pps_AC(t) == 0       % No peak shaving required
             P_pcc_target_AFR(t) = zeroresponse(t);
-        elseif Pps_AC(t) > 0    % Peak shaving -> counteract with opposite
+        elseif Pps_AC(t) > 0    % Peak shaving (discharging) -> counteract with opposite (charging)
             P_pcc_target_AFR(t) = chresponse(t);  
             P_soc_mgnt(t) = chresponse(t) - zeroresponse(t);
-        elseif Pps_AC(t) < 0    % Peak shaving -> counteract with opposite
+        elseif Pps_AC(t) < 0    % Peak shaving (charging) -> counteract with opposite (discharging)
             P_pcc_target_AFR(t) = dchresponse(t);
             P_soc_mgnt(t) = dchresponse(t) - zeroresponse(t);
         end            
-    elseif hflag == 1       % Force the upper part of the operational curve
+    elseif hflag(t) == 1       % Force the upper part of the operational curve
         P_pcc_target_AFR(t) = dchresponse(t);
-    elseif hflag == -1      % Force the lower part of the operational curve
+    elseif hflag(t) == -1      % Force the lower part of the operational curve
         P_pcc_target_AFR(t) = chresponse(t);
     end
 
@@ -155,12 +157,13 @@ for t = 1:T
     ELref(t+1) = ELref(t) - Pps_DC_adj(t) * dt / Emax;
 
     if (E(t+1)/Emax) > ELup(t)
-        hflag = 1;
+        hflag(t) = 1;
     elseif E(t+1)/Emax < ELdwn(t)
-        hflag = -1;
-    elseif (((E(t+1)/Emax) < ELref(t)) && hflag==1) || (((E(t+1)/Emax) > ELref(t)) && hflag==-1)
-        hflag = 0;
-    end        
+        hflag(t) = -1;
+    elseif (((E(t+1)/Emax) < ELref(t)) && hflag(t)==1) || (((E(t+1)/Emax) > ELref(t)) && hflag(t)==-1)
+        hflag(t) = 0;
+    end
+    hflag(t+1) = hflag(t); 
 end
 
 P_B = max(P_pcc/etaOW, P_pcc*etaOW);
@@ -181,17 +184,17 @@ fprintf('Battery cycles: %f\n', cycl_num)
 
 %% PLOTS
 % 2 main subplots: power&energy, frequency
-figure
+figure(1)
 subplot(2,1,1)
 hold on
 plot(Tst,P_pcc)
 yyaxis right 
-plot(Tst,E(1:end-1)/Emax, 'r')
+plot(Tst,E(1:end-1)/Emax*100, 'r')
 hold on
-plot(Tst,ELref(1:end-1),'--k')
-plot(Tst,ELup(1:end-1),'--g')
-plot(Tst,ELdwn(1:end-1),'--y')
-legend('Power [MW]','Energy [MWh]')
+plot(Tst,ELref(1:end-1)*100,'--k')
+plot(Tst,ELup(1:end-1)*100,'--g')
+plot(Tst,ELdwn(1:end-1)*100,'--y')
+legend('% power [-]','% energy [-]')
 title('Dispatch profile')
 subplot(2,1,2)
 plot(Tst,f)
@@ -216,9 +219,8 @@ plot(freq(2:end-1),upcurve(2:end-1)+max(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),lowcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
-scatter(f(1:100:end),P_pcc(1:100:end),5,E(1:100:end-1)/Emax,'filled')
+scatter(f(1:100:end),P_pcc(1:100:end), 5, E(1:100:end-1)/Emax,'filled')
 colorbar
-
 xlabel('Frequency [Hz]')
 ylabel('% nominal power [-]')
 
