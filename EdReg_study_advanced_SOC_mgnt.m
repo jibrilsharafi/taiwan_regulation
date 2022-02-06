@@ -16,12 +16,12 @@ load('ProfiliHoping_NoSoCRef')
 Tst=datetime(2018,12,01,0,0,0):seconds(1):datetime(2018,12,31,23,59,59);
 
 % Storage and Service parameters
-Emax = 286;         % [MWh]
-Pserv = 100;        % [MW]
+E_max = 286;         % [MWh]
+P_nominal = 100;        % [MW]
 
 % Initialize values
 EL_target_0=0.1;   % Starting target of SOC - 0.1 as we start charging +40%
-etaOW=0.94;     % Fixed efficiency
+eta=0.94;     % Fixed efficiency
 dt=1/3600;      % s -> h
 
 %% OPTIONS
@@ -64,9 +64,9 @@ end
 % This means that (eg) if it is charging (negative power), the response
 % will be a point (depending on the frequency, that's why interp1) on the
 % lower curve Discharge-oriented response
-dchResponse = interp1(freq, upcurve, f) * Pserv / 100;
+dchResponse = interp1(freq, upcurve, f) * P_nominal / 100;
 % Charge-oriented response
-chResponse = interp1(freq, lowcurve, f) * Pserv / 100;
+chResponse = interp1(freq, lowcurve, f) * P_nominal / 100;
 
 %% INITIALIZING VARIABLES
 % Number of seconds
@@ -79,14 +79,15 @@ EL_up = nan(1,T+1);
 EL_down = nan(1,T+1);
 P_target_AFR = nan(1,T);
 P = nan(1,T);
-P_SOC_managment = zeros(1,T);
+P_SOC_managment_AC = zeros(1,T);
 
-P_ps_AC = nan(1,T);
-P_ps_DC = nan(1,T);
+P_PS_DC = nan(1,T);
+P_SOC_PS_AC = nan(1,T);
+P_SOC_PS_DC = nan(1,T);
 P_target = nan(1,T);
 
 % Initial values
-E(1) = Emax * 0.5;        % Starting SOC: 50%
+E(1) = E_max * 0.5;        % Starting SOC: 50%
 EL_target(1) = EL_target_0;
 EL_up(1) = EL_target(1) + deadband;
 EL_down(1) = EL_target(1) - deadband;
@@ -119,6 +120,9 @@ zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
 hFlag = nan(1,T+1)';
 hFlag(1) = 0;
 
+sumEL_gain = 0;
+EL_gain = [];
+
 for t = 1:T
     if strcmp(OpMode, "EdReg")
         % Adjusting reference level for AFR SoC management based on the
@@ -131,19 +135,19 @@ for t = 1:T
     % Pmin and Pmax are related to the minimum and maximum constant power
     % available for 1 full second
     % Pmin is the maximum power while charging
-    Pmin = -(Emax - E(t)) / (etaOW*dt);
+    Pmin = -(E_max - E(t)) / (eta*dt);
     % Pmax is the maximum power while discharging
-    Pmax = E(t) * (etaOW/dt);
+    Pmax = E(t) * (eta/dt);
     
     if hFlag(t) == 0       % Freedom of choice of power 
         if Pps_AC(t) == 0       % No peak shaving required -> Do the least possible
             P_target_AFR(t) = zeroResponse(t);
         elseif Pps_AC(t) > 0    % Peak shaving (discharging) -> counteract with opposite (charging)
             P_target_AFR(t) = chResponse(t);  
-            P_SOC_managment(t) = chResponse(t) - zeroResponse(t);
+            P_SOC_managment_AC(t) = chResponse(t) - zeroResponse(t);
         elseif Pps_AC(t) < 0    % Peak shaving (charging) -> counteract with opposite (discharging)
             P_target_AFR(t) = dchResponse(t);
-            P_SOC_managment(t) = dchResponse(t) - zeroResponse(t);
+            P_SOC_managment_AC(t) = dchResponse(t) - zeroResponse(t);
         end            
     elseif hFlag(t) == 1       % Force the upper part of the operational curve
         P_target_AFR(t) = dchResponse(t);
@@ -152,28 +156,39 @@ for t = 1:T
     end
 
     % Power AC side including the SOC managment
-    P_ps_AC(t) = Pps_AC(t) + P_SOC_managment(t);
+    P_PS_DC(t) = max(Pps_AC(t)/eta, Pps_AC(t)*eta);
+    P_SOC_managment_DC = max(P_SOC_managment_AC(t)/eta, P_SOC_managment_AC(t)*eta);
+    %P_SOC_PS_AC(t) = Pps_AC(t) + P_SOC_managment_AC(t);
     % Real power DC side 
-    P_ps_DC(t) = max(P_ps_AC(t)/etaOW, P_ps_AC(t)*etaOW);
-    
+    %P_SOC_PS_DC(t) = max(P_SOC_PS_AC(t)/eta, P_SOC_PS_AC(t)*eta);
+    P_SOC_PS_DC(t) = P_PS_DC(t) + P_SOC_managment_DC;
     P_target(t) = P_target_AFR(t) + Pps_AC(t);
     
-    P(t) = min([max([P_target(t), Pmin, -Pserv]), Pmax, Pserv]);
+    P(t) = min([max([P_target(t), Pmin, -P_nominal]), Pmax, P_nominal]);
     
-    E(t+1) = E(t) - max(P(t)/etaOW, P(t)*etaOW) * dt;
-    EL_target(t+1) = EL_target(t) - P_ps_DC(t) * dt / Emax;
+    E(t+1) = E(t) - max(P(t)/eta, P(t)*eta) * dt;
+    EL_target(t+1) = EL_target(t) - P_SOC_PS_DC(t) * dt / E_max;
 
-    if (E(t+1)/Emax) > EL_up(t)
+    if abs(EL_target(t+1) - EL_target(t)) > eps
+        sumEL_gain = sumEL_gain + EL_target(t+1) - EL_target(t);
+    else
+        if sumEL_gain ~= 0
+            EL_gain = [EL_gain sumEL_gain];
+            sumEL_gain = 0;
+        end
+    end
+
+    if (E(t+1)/E_max) > EL_up(t)
         hFlag(t) = 1;
-    elseif E(t+1)/Emax < EL_down(t)
+    elseif E(t+1)/E_max < EL_down(t)
         hFlag(t) = -1;
-    elseif (((E(t+1)/Emax) < EL_target(t)) && hFlag(t)==1) || (((E(t+1)/Emax) > EL_target(t)) && hFlag(t)==-1)
+    elseif (((E(t+1)/E_max) < EL_target(t)) && hFlag(t)==1) || (((E(t+1)/E_max) > EL_target(t)) && hFlag(t)==-1)
         hFlag(t) = 0;
     end
     hFlag(t+1) = hFlag(t); 
 end
 
-P_B = max(P/etaOW, P*etaOW);
+P_B = max(P/eta, P*eta);
 
 %% ECONOMIC EVALUATION
 
@@ -181,32 +196,27 @@ P_B = max(P/etaOW, P*etaOW);
 c_el = 1.8;                         % [NTD/kWh]
 dh_capacity_price = 550;            % [NTD/MW/h]
 performance_price = 350;            % [NTD/MW/h]
-net_exchange = sum(P)*dt;       % [MWh]
+net_exchange = sum(P)*dt;           % [MWh]
 
-revenue = Pserv*T*dt*(dh_capacity_price + performance_price) + min(net_exchange,0) * c_el * 1000; % [NTD]
+revenue = P_nominal*T*dt*(dh_capacity_price + performance_price) + min(net_exchange,0) * c_el * 1000; % [NTD]
 
-rev_MW = revenue * 365 / (T*dt/24) / Pserv * 0.03;           % [€]
-cycl_num = sum(abs(P_B*dt)) / Emax * 365 / (T*dt/24) / 2;    % [-]
+rev_MW = revenue * 365 / (T*dt/24) / P_nominal * 0.03;           % [€]
+cycl_num = sum(abs(P_B*dt)) / E_max * 365 / (T*dt/24) / 2;    % [-]
 fprintf('Battery cycles: %f\n', cycl_num)
 
 %% PLOTS
 % 2 main subplots: power&energy, frequency
 figure(1)
-subplot(2,1,1)
 hold on
 plot(Tst,P)
 yyaxis right 
-plot(Tst,E(1:end-1)/Emax*100, 'r')
+plot(Tst,E(1:end-1)/E_max*100, 'r',LineWidth=1)
 hold on
 plot(Tst,EL_target(1:end-1)*100,'--k')
 plot(Tst,EL_up(1:end-1)*100,'--g')
 plot(Tst,EL_down(1:end-1)*100,'--y')
 legend('% power [-]','% energy [-]')
 title('Dispatch profile')
-subplot(2,1,2)
-plot(Tst,f)
-title('Frequency')
-linkaxes(get(gcf,'children'),'x')
 
 % Plot sorted power
 figure(2)
@@ -226,7 +236,7 @@ plot(freq(2:end-1),upcurve(2:end-1)+max(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),lowcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
-scatter(f(1:100:end),P(1:100:end), 5, E(1:100:end-1)/Emax,'filled')
+scatter(f(1:100:end),P(1:100:end), 5, E(1:100:end-1)/E_max,'filled')
 colorbar
 xlabel('Frequency [Hz]')
 ylabel('% nominal power [-]')
