@@ -20,7 +20,7 @@ Emax = 286;         % [MWh]
 Pserv = 100;        % [MW]
 
 % Initialize values
-ELtarget=0.1;   % Starting target of SOC - 0.1 as we start charging +40%
+EL_target_0=0.1;   % Starting target of SOC - 0.1 as we start charging +40%
 etaOW=0.94;     % Fixed efficiency
 dt=1/3600;      % s -> h
 
@@ -64,61 +64,68 @@ end
 % This means that (eg) if it is charging (negative power), the response
 % will be a point (depending on the frequency, that's why interp1) on the
 % lower curve Discharge-oriented response
-dchresponse = interp1(freq, upcurve, f) * Pserv / 100;
+dchResponse = interp1(freq, upcurve, f) * Pserv / 100;
 % Charge-oriented response
-chresponse = interp1(freq, lowcurve, f) * Pserv / 100;
+chResponse = interp1(freq, lowcurve, f) * Pserv / 100;
 
 %% INITIALIZING VARIABLES
 % Number of seconds
-T = length(dchresponse);
+T = length(dchResponse);
 
 % Empty arrays
 E = nan(1,T+1);
-ELref = nan(1,T+1);
-ELup = nan(1,T+1);
-ELdwn = nan(1,T+1);
-P_pcc_target_AFR = nan(1,T);
-P_pcc = nan(1,T);
-P_soc_mgnt = zeros(1,T);
+EL_target = nan(1,T+1);
+EL_up = nan(1,T+1);
+EL_down = nan(1,T+1);
+P_target_AFR = nan(1,T);
+P = nan(1,T);
+P_SOC_managment = zeros(1,T);
 
-Pps_AC_adj = nan(1,T);
-Pps_DC_adj = nan(1,T);
-P_pcc_target = nan(1,T);
+P_ps_AC = nan(1,T);
+P_ps_DC = nan(1,T);
+P_target = nan(1,T);
 
 % Initial values
 E(1) = Emax * 0.5;        % Starting SOC: 50%
-ELref(1) = ELtarget;
-ELup(1) = ELtarget + deadband;
-ELdwn(1) = ELtarget - deadband;
+EL_target(1) = EL_target_0;
+EL_up(1) = EL_target(1) + deadband;
+EL_down(1) = EL_target(1) - deadband;
 
 %% ZERO RESPONSE ARRAY
 % Creating zero response
-norespflag = sign(dchresponse.*chresponse) == -1;
-percnoresp = sum(norespflag) / T;
-norespset = inf(T,1);
-norespset(norespflag) = 0;   
+% First, we check the positions where NOT both the charging curve and
+% discharging curve (given by operation area upper and lower boundaries)
+% are positive or negative, meaning we only get the middle part with 0%
+% power
+noRespFlag = sign(dchResponse.*chResponse) == -1;
+% We create this array of infinite values as later we will use the min
+% function. The values which will be 0 will be substituted with 0 in the
+% array, the rest stays infinite
+noRespSet = inf(T,1);
+% The values which could actually be 0 power are substituted in
+noRespSet(noRespFlag) = 0;   
 % This variable represents the zero power when it is possible, e.g. when
 % the upper bound and the lower bound are one positive and one negative,
 % while it has an inf value when upper and lower bound have the same sign
 % (both above or below the zero power). This ensures that we can choose the
 % best approach (zero power) when we can, while still following the
 % constraints.
-zeroresponse = min(abs([dchresponse'; chresponse'; norespset'])) .* sign(60-f');
+zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
 % Lowest allowed response (closest to 0% power, to achieve less usage)
 
 %% DISPATCH SIMULATION
 % hflag signals if the target power request (energy) is above, below or
 % inside the operational area
-hflag = nan(1,T+1)';
-hflag(1) = 0;
+hFlag = nan(1,T+1)';
+hFlag(1) = 0;
 
 for t = 1:T
     if strcmp(OpMode, "EdReg")
         % Adjusting reference level for AFR SoC management based on the
         % integration of the peak shaving setpoint (hysteresis follows the
         % curve due to peak shaving)
-        ELup(t) = ELref(t) + deadband;
-        ELdwn(t) = ELref(t) - deadband;
+        EL_up(t) = EL_target(t) + deadband;
+        EL_down(t) = EL_target(t) - deadband;
     end
 
     % Pmin and Pmax are related to the minimum and maximum constant power
@@ -128,45 +135,45 @@ for t = 1:T
     % Pmax is the maximum power while discharging
     Pmax = E(t) * (etaOW/dt);
     
-    if hflag(t) == 0       % Freedom of choice of power 
-        if Pps_AC(t) == 0       % No peak shaving required
-            P_pcc_target_AFR(t) = zeroresponse(t);
+    if hFlag(t) == 0       % Freedom of choice of power 
+        if Pps_AC(t) == 0       % No peak shaving required -> Do the least possible
+            P_target_AFR(t) = zeroResponse(t);
         elseif Pps_AC(t) > 0    % Peak shaving (discharging) -> counteract with opposite (charging)
-            P_pcc_target_AFR(t) = chresponse(t);  
-            P_soc_mgnt(t) = chresponse(t) - zeroresponse(t);
+            P_target_AFR(t) = chResponse(t);  
+            P_SOC_managment(t) = chResponse(t) - zeroResponse(t);
         elseif Pps_AC(t) < 0    % Peak shaving (charging) -> counteract with opposite (discharging)
-            P_pcc_target_AFR(t) = dchresponse(t);
-            P_soc_mgnt(t) = dchresponse(t) - zeroresponse(t);
+            P_target_AFR(t) = dchResponse(t);
+            P_SOC_managment(t) = dchResponse(t) - zeroResponse(t);
         end            
-    elseif hflag(t) == 1       % Force the upper part of the operational curve
-        P_pcc_target_AFR(t) = dchresponse(t);
-    elseif hflag(t) == -1      % Force the lower part of the operational curve
-        P_pcc_target_AFR(t) = chresponse(t);
+    elseif hFlag(t) == 1       % Force the upper part of the operational curve
+        P_target_AFR(t) = dchResponse(t);
+    elseif hFlag(t) == -1      % Force the lower part of the operational curve
+        P_target_AFR(t) = chResponse(t);
     end
 
     % Power AC side including the SOC managment
-    Pps_AC_adj(t) = Pps_AC(t) + P_soc_mgnt(t);
+    P_ps_AC(t) = Pps_AC(t) + P_SOC_managment(t);
     % Real power DC side 
-    Pps_DC_adj(t) = max(Pps_AC_adj(t)/etaOW, Pps_AC_adj(t)*etaOW);
+    P_ps_DC(t) = max(P_ps_AC(t)/etaOW, P_ps_AC(t)*etaOW);
     
-    P_pcc_target(t) = P_pcc_target_AFR(t) + Pps_AC(t);
+    P_target(t) = P_target_AFR(t) + Pps_AC(t);
     
-    P_pcc(t) = min([max([P_pcc_target(t), Pmin, -Pserv]), Pmax, Pserv]);
+    P(t) = min([max([P_target(t), Pmin, -Pserv]), Pmax, Pserv]);
     
-    E(t+1) = E(t) - max(P_pcc(t)/etaOW, P_pcc(t)*etaOW) * dt;
-    ELref(t+1) = ELref(t) - Pps_DC_adj(t) * dt / Emax;
+    E(t+1) = E(t) - max(P(t)/etaOW, P(t)*etaOW) * dt;
+    EL_target(t+1) = EL_target(t) - P_ps_DC(t) * dt / Emax;
 
-    if (E(t+1)/Emax) > ELup(t)
-        hflag(t) = 1;
-    elseif E(t+1)/Emax < ELdwn(t)
-        hflag(t) = -1;
-    elseif (((E(t+1)/Emax) < ELref(t)) && hflag(t)==1) || (((E(t+1)/Emax) > ELref(t)) && hflag(t)==-1)
-        hflag(t) = 0;
+    if (E(t+1)/Emax) > EL_up(t)
+        hFlag(t) = 1;
+    elseif E(t+1)/Emax < EL_down(t)
+        hFlag(t) = -1;
+    elseif (((E(t+1)/Emax) < EL_target(t)) && hFlag(t)==1) || (((E(t+1)/Emax) > EL_target(t)) && hFlag(t)==-1)
+        hFlag(t) = 0;
     end
-    hflag(t+1) = hflag(t); 
+    hFlag(t+1) = hFlag(t); 
 end
 
-P_B = max(P_pcc/etaOW, P_pcc*etaOW);
+P_B = max(P/etaOW, P*etaOW);
 
 %% ECONOMIC EVALUATION
 
@@ -174,7 +181,7 @@ P_B = max(P_pcc/etaOW, P_pcc*etaOW);
 c_el = 1.8;                         % [NTD/kWh]
 dh_capacity_price = 550;            % [NTD/MW/h]
 performance_price = 350;            % [NTD/MW/h]
-net_exchange = sum(P_pcc)*dt;       % [MWh]
+net_exchange = sum(P)*dt;       % [MWh]
 
 revenue = Pserv*T*dt*(dh_capacity_price + performance_price) + min(net_exchange,0) * c_el * 1000; % [NTD]
 
@@ -187,13 +194,13 @@ fprintf('Battery cycles: %f\n', cycl_num)
 figure(1)
 subplot(2,1,1)
 hold on
-plot(Tst,P_pcc)
+plot(Tst,P)
 yyaxis right 
 plot(Tst,E(1:end-1)/Emax*100, 'r')
 hold on
-plot(Tst,ELref(1:end-1)*100,'--k')
-plot(Tst,ELup(1:end-1)*100,'--g')
-plot(Tst,ELdwn(1:end-1)*100,'--y')
+plot(Tst,EL_target(1:end-1)*100,'--k')
+plot(Tst,EL_up(1:end-1)*100,'--g')
+plot(Tst,EL_down(1:end-1)*100,'--y')
 legend('% power [-]','% energy [-]')
 title('Dispatch profile')
 subplot(2,1,2)
@@ -219,7 +226,7 @@ plot(freq(2:end-1),upcurve(2:end-1)+max(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),lowcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
-scatter(f(1:100:end),P_pcc(1:100:end), 5, E(1:100:end-1)/Emax,'filled')
+scatter(f(1:100:end),P(1:100:end), 5, E(1:100:end-1)/Emax,'filled')
 colorbar
 xlabel('Frequency [Hz]')
 ylabel('% nominal power [-]')
