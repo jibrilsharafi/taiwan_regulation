@@ -29,16 +29,7 @@ deadband=0.05;  %% Hysteresis band
 
 % Test with different datasets 
 %f(:) = 60;   % Fixed 60Hz
-%f(:) = mean(f) + std(f)/5.*randn(length(f),1); % 60Hz mean, 0.05 std
-
-%Check the width of the peak shaving square wave
-% index = find(Pps_AC);
-% width = [];
-% for i = 1:length(index)-1
-%     if (index(i+1) - index(i)) > 1
-%         width = [width, (index(i+1) - index(i))*(1+-2*((index(i+1) - index(i)) < 20000))];
-%     end
-% end
+%f(:) = 60 + 0.05*randn(length(f),1); % 60Hz mean, 0.05 std
 
 %% OPERATION MODE
 OpMode = "EdReg";      %EdReg, dReg05, dReg025
@@ -77,14 +68,15 @@ E = nan(1,T+1);
 EL_target = nan(1,T+1);
 EL_up = nan(1,T+1);
 EL_down = nan(1,T+1);
-P_target_AFR = nan(1,T);
-P = nan(1,T);
+P_target_AFR_AC = nan(1,T);
+P_AC = nan(1,T);
 P_SOC_managment_AC = zeros(1,T);
+P_SOC_managment_DC = zeros(1,T);
 
 P_PS_DC = nan(1,T);
 P_SOC_PS_AC = nan(1,T);
-P_SOC_PS_DC = nan(1,T);
-P_target = nan(1,T);
+P_DC = nan(1,T);
+P_target_AC = nan(1,T);
 
 % Initial values
 E(1) = E_max * 0.5;        % Starting SOC: 50%
@@ -120,17 +112,12 @@ zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
 hFlag = nan(1,T+1)';
 hFlag(1) = 0;
 
-sumEL_gain = 0;
-EL_gain = [];
-
 for t = 1:T
-    if strcmp(OpMode, "EdReg")
-        % Adjusting reference level for AFR SoC management based on the
-        % integration of the peak shaving setpoint (hysteresis follows the
-        % curve due to peak shaving)
-        EL_up(t) = EL_target(t) + deadband;
-        EL_down(t) = EL_target(t) - deadband;
-    end
+    % Adjusting reference level for AFR SoC management based on the
+    % integration of the peak shaving setpoint (hysteresis follows the
+    % curve due to peak shaving)
+    EL_up(t) = EL_target(t) + deadband;
+    EL_down(t) = EL_target(t) - deadband;
 
     % Pmin and Pmax are related to the minimum and maximum constant power
     % available for 1 full second
@@ -141,43 +128,35 @@ for t = 1:T
     
     if hFlag(t) == 0       % Freedom of choice of power 
         if Pps_AC(t) == 0       % No peak shaving required -> Do the least possible
-            P_target_AFR(t) = zeroResponse(t);
+            P_target_AFR_AC(t) = zeroResponse(t);
         elseif Pps_AC(t) > 0    % Peak shaving (discharging) -> counteract with opposite (charging)
-            P_target_AFR(t) = chResponse(t);  
+            P_target_AFR_AC(t) = chResponse(t);  
             P_SOC_managment_AC(t) = chResponse(t) - zeroResponse(t);
         elseif Pps_AC(t) < 0    % Peak shaving (charging) -> counteract with opposite (discharging)
-            P_target_AFR(t) = dchResponse(t);
+            P_target_AFR_AC(t) = dchResponse(t);
             P_SOC_managment_AC(t) = dchResponse(t) - zeroResponse(t);
         end            
     elseif hFlag(t) == 1       % Force the upper part of the operational curve
-        P_target_AFR(t) = dchResponse(t);
+        P_target_AFR_AC(t) = dchResponse(t);
     elseif hFlag(t) == -1      % Force the lower part of the operational curve
-        P_target_AFR(t) = chResponse(t);
+        P_target_AFR_AC(t) = chResponse(t);
     end
 
-    % Power AC side including the SOC managment
+    % Now we calculate the single DC components, then we sum them. This
+    % process is needed in order to set the EL_target.
     P_PS_DC(t) = max(Pps_AC(t)/eta, Pps_AC(t)*eta);
-    P_SOC_managment_DC = max(P_SOC_managment_AC(t)/eta, P_SOC_managment_AC(t)*eta);
-    %P_SOC_PS_AC(t) = Pps_AC(t) + P_SOC_managment_AC(t);
-    % Real power DC side 
-    %P_SOC_PS_DC(t) = max(P_SOC_PS_AC(t)/eta, P_SOC_PS_AC(t)*eta);
-    P_SOC_PS_DC(t) = P_PS_DC(t) + P_SOC_managment_DC;
-    P_target(t) = P_target_AFR(t) + Pps_AC(t);
-    
-    P(t) = min([max([P_target(t), Pmin, -P_nominal]), Pmax, P_nominal]);
-    
-    E(t+1) = E(t) - max(P(t)/eta, P(t)*eta) * dt;
-    EL_target(t+1) = EL_target(t) - P_SOC_PS_DC(t) * dt / E_max;
+    P_SOC_managment_DC(t) = max(P_SOC_managment_AC(t)/eta, P_SOC_managment_AC(t)*eta);
+    P_DC(t) = P_PS_DC(t) + P_SOC_managment_DC(t);
 
-    if abs(EL_target(t+1) - EL_target(t)) > eps
-        sumEL_gain = sumEL_gain + EL_target(t+1) - EL_target(t);
-    else
-        if sumEL_gain ~= 0
-            EL_gain = [EL_gain sumEL_gain];
-            sumEL_gain = 0;
-        end
-    end
+    % Real power required by grid, AC side
+    P_target_AC(t) = P_target_AFR_AC(t) + Pps_AC(t);
+    P_AC(t) = min([max([P_target_AC(t), Pmin, -P_nominal]), Pmax, P_nominal]);
+    
+    % Calculation of energy and energy target for next loop
+    E(t+1) = E(t) - max(P_AC(t)/eta, P_AC(t)*eta) * dt;
+    EL_target(t+1) = EL_target(t) - P_DC(t) * dt / E_max;
 
+    % Depending on the energy level, hFlag decides what to do next loop
     if (E(t+1)/E_max) > EL_up(t)
         hFlag(t) = 1;
     elseif E(t+1)/E_max < EL_down(t)
@@ -188,27 +167,26 @@ for t = 1:T
     hFlag(t+1) = hFlag(t); 
 end
 
-P_B = max(P/eta, P*eta);
+E_cycled_AC = max(P_AC/eta, P_AC*eta);
 
 %% ECONOMIC EVALUATION
-
 % Economic data
 c_el = 1.8;                         % [NTD/kWh]
 dh_capacity_price = 550;            % [NTD/MW/h]
 performance_price = 350;            % [NTD/MW/h]
-net_exchange = sum(P)*dt;           % [MWh]
+net_exchange = sum(P_AC)*dt;           % [MWh]
 
 revenue = P_nominal*T*dt*(dh_capacity_price + performance_price) + min(net_exchange,0) * c_el * 1000; % [NTD]
 
 rev_MW = revenue * 365 / (T*dt/24) / P_nominal * 0.03;           % [€]
-cycl_num = sum(abs(P_B*dt)) / E_max * 365 / (T*dt/24) / 2;    % [-]
+cycl_num = sum(abs(E_cycled_AC*dt)) / E_max * 365 / (T*dt/24) / 2;    % [-]
 fprintf('Battery cycles: %f\n', cycl_num)
 
 %% PLOTS
 % 2 main subplots: power&energy, frequency
 figure(1)
 hold on
-plot(Tst,P)
+plot(Tst,P_AC)
 yyaxis right 
 plot(Tst,E(1:end-1)/E_max*100, 'r',LineWidth=1)
 hold on
@@ -220,7 +198,7 @@ title('Dispatch profile')
 
 % Plot sorted power
 figure(2)
-plot(T*dt-(1:T)*dt, (sort(abs(P_B))))
+plot(T*dt-(1:T)*dt, (sort(abs(E_cycled_AC))))
 ylabel('Battery power [MW]')
 xlabel('# of operating hours at higher battery power [h]')
 
@@ -236,17 +214,7 @@ plot(freq(2:end-1),upcurve(2:end-1)+max(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),lowcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
-scatter(f(1:100:end),P(1:100:end), 5, E(1:100:end-1)/E_max,'filled')
+scatter(f(1:100:end),P_AC(1:100:end), 5, E(1:100:end-1)/E_max,'filled')
 colorbar
 xlabel('Frequency [Hz]')
 ylabel('% nominal power [-]')
-
-% %%
-% output=timetable(Tst',P_pcc_target_AFR',P_pcc',P_B');
-% 
-% % Tstnew=datetime(2018,12,01,0,0,0):seconds(4):datetime(2018,12,31,23,59,59);
-% 
-% % output=retime(output,Tstnew,'mean');
-% 
-% output=output(isbetween(Tst,datetime(2018,12,13,0,0,0),datetime(2018,12,20,23,59,59))',:);
-
