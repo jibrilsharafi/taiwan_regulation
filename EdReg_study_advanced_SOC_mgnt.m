@@ -118,6 +118,12 @@ for t = 1:T
     % curve due to peak shaving)
     EL_up(t) = EL_target(t) + deadband;
     EL_down(t) = EL_target(t) - deadband;
+    if EL_up(t) > 0.99
+        EL_up(t) = EL_up(t-1);
+    end
+    if EL_up(t) < 0.01
+        EL_down(t) = EL_down(t-1);
+    end
 
     % Pmin and Pmax are related to the minimum and maximum constant power
     % available for 1 full second
@@ -157,14 +163,14 @@ for t = 1:T
     EL_target(t+1) = EL_target(t) - P_DC(t) * dt / E_max;
 
     % Depending on the energy level, hFlag decides what to do next loop
-    if (E(t+1)/E_max) > EL_up(t)
+    if ((E(t+1)/E_max) > EL_up(t)) && (Pps_AC(t) <= 0)
         hFlag(t) = 1;
-    elseif E(t+1)/E_max < EL_down(t)
+    elseif E(t+1)/E_max < EL_down(t) && (Pps_AC(t) >= 0)
         hFlag(t) = -1;
     elseif (((E(t+1)/E_max) < EL_target(t)) && hFlag(t)==1) || (((E(t+1)/E_max) > EL_target(t)) && hFlag(t)==-1)
         hFlag(t) = 0;
     end
-    hFlag(t+1) = hFlag(t); 
+    hFlag(t+1) = hFlag(t);                                                                                                                                       
 end
 
 E_cycled_AC = max(P_AC/eta, P_AC*eta);
@@ -196,12 +202,14 @@ plot(Tst,EL_down(1:end-1)*100,'--y')
 legend('% power [-]','% energy [-]')
 title('Dispatch profile')
 
+%%
 % Plot sorted power
 figure(2)
 plot(T*dt-(1:T)*dt, (sort(abs(E_cycled_AC))))
 ylabel('Battery power [MW]')
 xlabel('# of operating hours at higher battery power [h]')
 
+%%
 % Plot frequency vs power response
 figure(3)
 hold on
@@ -214,7 +222,9 @@ plot(freq(2:end-1),upcurve(2:end-1)+max(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),lowcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
-scatter(f(1:100:end),P_AC(1:100:end), 5, E(1:100:end-1)/E_max,'filled')
-colorbar
+scatter(f(1:10:end),P_AC(1:10:end), 5, E(1:10:end-1)/E_max*100)
+
+c = colorbar;
+c.Label.String = '% energy level [-]';
 xlabel('Frequency [Hz]')
 ylabel('% nominal power [-]')
