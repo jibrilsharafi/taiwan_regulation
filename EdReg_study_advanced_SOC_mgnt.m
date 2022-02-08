@@ -10,6 +10,28 @@ close all; clear; clc
 % (frequency, mean value 60Hz) and Pps_AC (power peak shaving AC, which has
 % 3 values: -50, 0, 50)
 load('ProfiliHoping_NoSoCRef')
+
+%% STUDY DISTRIBUTION f
+reduction_factor = 1e3;
+f_reduced = f(1:reduction_factor:end);
+n_bins = floor(1 + 3.322*log10(T));
+
+figure()
+subplot(1,2,1)
+hold on
+grid on
+xlabel('Time [s]')
+ylabel('Residuals [Hz]')
+legend(Location="northwest")
+histogram(f,NumBins=n_bins,DisplayName=sprintf('Mean = %2.4f, stf = %0.4f', [mean(f), std(f)]))
+subplot(1,2,2)
+hold on
+grid on
+xlabel('Time [s]')
+ylabel('Residuals [Hz]')
+legend
+plot([1:reduction_factor:T], f_reduced-mean(f_reduced), 'o', DisplayName='Residuals')
+plot([0 T], [0 0], 'r--', LineWidth=1, DisplayName='Mean value')
 %% PARAMETERS
 % Array of datetime, timestep: seconds
 Tst=datetime(2018,12,01,0,0,0):seconds(1):datetime(2018,12,31,23,59,59);
