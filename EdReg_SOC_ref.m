@@ -65,7 +65,7 @@ T = length(dchResponse);
 %fwait = waitbar(0,'Please wait...');
 
 steps = 4;  % Only a square number so that if fits the subplots evenly
-deadband = linspace(0.01, 0.30, steps);
+deadband = linspace(0.01, 0.13, steps);
 figure(1)
 
 seconds_P_overdch = nan(1, steps);
@@ -261,23 +261,22 @@ for ii = 1:steps
     title(sprintf('Deadband = %0.2f, cycles = %0.2f', [deadband(ii), cycl_num(ii)]))
     hold off
 end
-%delete(fwait)
-%%
+
+%% EVALUATION PLOT
 figure()
 title('Evaluation performances')
 xlabel('Deadband')
 legend
 hold on
+
 yyaxis left
 plot(deadband, cycl_num, 'k', DisplayName='Battery cycles', LineWidth=1)
-yyaxis right
-%plot(deadband, seconds_P_overdch, DisplayName='Seconds P overdischarge')
-%plot(deadband, seconds_P_overch, DisplayName='Seconds P overcharge')
-plot(deadband, seconds_E_full, 'r', DisplayName='Seconds E full', LineWidth=1)
-plot(deadband, seconds_E_empty, 'b', DisplayName='Seconds E empty', LineWidth=1)
 
-%
-% %% PLOTS
+yyaxis right
+plot(deadband, seconds_E_full, '-r', DisplayName='Seconds E full', LineWidth=1)
+plot(deadband, seconds_E_empty, '-b', DisplayName='Seconds E empty', LineWidth=1)
+
+%% OLD PLOTS
 % % 2 main subplots: power&energy, frequency
 % figure(1)
 % hold on

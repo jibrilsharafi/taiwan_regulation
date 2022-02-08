@@ -2,7 +2,6 @@
 close all; clear; clc
 
 %% LOAD DATA
-
 % Profiles including the SoC reference according to "standard" SoC
 % management strategy (independent composition of peak shaving & dReg)
 %load('ProfiliHoping')
@@ -23,6 +22,9 @@ P_nominal = 100;        % [MW]
 EL_target_0=0.1;   % Starting target of SOC - 0.1 as we start charging +40%
 eta=0.94;     % Fixed efficiency
 dt=1/3600;      % s -> h
+
+% Number of seconds
+T = length(Tst);
 
 %% OPTIONS
 %deadband=0.05;  %% Hysteresis band
@@ -59,18 +61,44 @@ dchResponse = interp1(freq, upcurve, f) * P_nominal / 100;
 % Charge-oriented response
 chResponse = interp1(freq, lowcurve, f) * P_nominal / 100;
 
+%% ZERO RESPONSE ARRAY
+% Creating zero response
+% First, we check the positions where NOT both the charging curve and
+% discharging curve (given by operation area upper and lower boundaries)
+% are positive or negative, meaning we only get the middle part with 0%
+% power
+noRespFlag = sign(dchResponse.*chResponse) == -1;
+% We create this array of infinite values as later we will use the min
+% function. The values which will be 0 will be substituted with 0 in the
+% array, the rest stays infinite
+noRespSet = inf(T,1);
+% The values which could actually be 0 power are substituted in
+noRespSet(noRespFlag) = 0;
+% This variable represents the zero power when it is possible, e.g. when
+% the upper bound and the lower bound are one positive and one negative,
+% while it has an inf value when upper and lower bound have the same sign
+% (both above or below the zero power). This ensures that we can choose the
+% best approach (zero power) when we can, while still following the
+% constraints.
+zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
+% Lowest allowed response (closest to 0% power, to achieve less usage)
+
 %% INITIALIZING VARIABLES
-% Number of seconds
-T = length(dchResponse);
-
-
-%fwait = waitbar(0,'Please wait...');
-
 steps = 4;  % Only a square number so that if fits the subplots evenly
-deadband = linspace(0.01, 0.15, steps);
-figure()
+deadband = linspace(0.01, 0.13, steps);
 
-for ii = 1:length(deadband)
+seconds_P_overdch = nan(1, steps);
+seconds_P_overch = nan(1, steps);
+seconds_E_full = nan(1, steps);
+seconds_E_empty = nan(1, steps);
+
+revenue = nan(1, steps);
+rev_MW = nan(1, steps);
+cycl_num = nan(1, steps);
+SoCref_cycl_num = nan(1, steps);
+
+%% MAIN LOOP
+for ii = 1:steps
     % Empty arrays
     E = nan(1,T+1);
     EL_target = nan(1,T+1);
@@ -80,50 +108,16 @@ for ii = 1:length(deadband)
     P_AC = nan(1,T);
     P_SOC_managment_AC = zeros(1,T);
     P_SOC_managment_DC = zeros(1,T);
-
     P_PS_DC = nan(1,T);
     P_SOC_PS_AC = nan(1,T);
     P_DC = nan(1,T);
     P_target_AC = nan(1,T);
-
-    % Initial values
-    E(1) = E_max * 0.5;        % Starting SOC: 50%
-    EL_target(1) = EL_target_0;
-    % EL_up(1) = EL_target(1) + deadband;
-    % EL_down(1) = EL_target(1) - deadband;
-
-    % ZERO RESPONSE ARRAY
-    % Creating zero response
-    % First, we check the positions where NOT both the charging curve and
-    % discharging curve (given by operation area upper and lower boundaries)
-    % are positive or negative, meaning we only get the middle part with 0%
-    % power
-    noRespFlag = sign(dchResponse.*chResponse) == -1;
-    % We create this array of infinite values as later we will use the min
-    % function. The values which will be 0 will be substituted with 0 in the
-    % array, the rest stays infinite
-    noRespSet = inf(T,1);
-    % The values which could actually be 0 power are substituted in
-    noRespSet(noRespFlag) = 0;
-    % This variable represents the zero power when it is possible, e.g. when
-    % the upper bound and the lower bound are one positive and one negative,
-    % while it has an inf value when upper and lower bound have the same sign
-    % (both above or below the zero power). This ensures that we can choose the
-    % best approach (zero power) when we can, while still following the
-    % constraints.
-    zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
-    % Lowest allowed response (closest to 0% power, to achieve less usage)
 
     % DISPATCH SIMULATION
     % hflag signals if the target power request (energy) is above, below or
     % inside the operational area
     hFlag = nan(1,T+1)';
     hFlag(1) = 0;
-
-    revenue = nan(1,steps);
-    rev_MW = nan(1,steps);
-    cycl_num = nan(1,steps);
-
 
     E(1) = E_max * 0.5;        % Starting SOC: 50%
     EL_target(1) = EL_target_0;
@@ -190,7 +184,7 @@ for ii = 1:length(deadband)
         hFlag(t+1) = hFlag(t);
     end
 
-    E_cycled_AC = max(P_AC/eta, P_AC*eta);
+    P_DC_from_AC = max(P_AC/eta, P_AC*eta);
 
     % Economic data
     c_el = 1.8;                         % [NTD/kWh]
@@ -201,18 +195,26 @@ for ii = 1:length(deadband)
     revenue(ii) = P_nominal*T*dt*(dh_capacity_price + performance_price) + min(net_exchange,0) * c_el * 1000; % [NTD]
 
     rev_MW(ii) = revenue(ii) * 365 / (T*dt/24) / P_nominal * 0.03;           % [€]
-    cycl_num(ii) = sum(abs(E_cycled_AC*dt)) / E_max * 365 / (T*dt/24) / 2;    % [-]
-    %fprintf('Battery cycles: %f\n', cycl_num)
+    cycl_num(ii) = sum(abs(P_DC_from_AC*dt)) / E_max * 365 / (T*dt/24) / 2;    % [-]
 
-    % Update waitbar and message
-    %waitbar(ii/length(deadband),fwait,sprintf('Deadband: %0.2f, cycles: %0.2f', [deadband(ii), cycl_num(ii)]))
+    index_P_overdch = find(P_AC/P_nominal >= 1);
+    index_P_overch = find(P_AC/P_nominal <= -1);
+    index_E_full = find(E/E_max >= 1);
+    index_E_empty = find(E/E_max <= 0);
 
+    seconds_P_overdch(ii) = length(index_P_overdch);
+    seconds_P_overch(ii) = length(index_P_overch);
+    seconds_E_full(ii) = length(index_E_full);
+    seconds_E_empty(ii) = length(index_E_empty);
+
+    % Subplot with operational area
+    figure(1)
     subplot(sqrt(steps),sqrt(steps),ii)
     hold on
-
     xlabel('Frequency [Hz]')
     ylabel('% nominal power [-]')
     title(sprintf('Deadband = %0.2f, cycles = %0.2f', [deadband(ii), cycl_num(ii)]))
+    axis([59.5 60.5 -120 120])
 
     plot(freq(2:end-1),upcurve(2:end-1),'--k','linewidth',2)
     plot(freq(2:end-1),lowcurve(2:end-1),'--k','linewidth',2)
@@ -224,16 +226,39 @@ for ii = 1:length(deadband)
     plot(freq(2:end-1),upcurve(2:end-1)+min(Pps_AC),'--k','linewidth',2)
 
     scatter(f(1:10:end), P_AC(1:10:end), 5, E(1:10:end-1)/E_max*100)
-    axis([59.5 60.5 -120 120])
-
     c = colorbar;
     c.Label.String = '% energy level [-]';
 
-
+    % Main plot: power&energy
+    figure(ii+1)
+    hold on
+    plot(Tst,P_AC)
+    yyaxis right
+    plot(Tst,E(1:end-1)/E_max*100, 'r',LineWidth=1)
+    hold on
+    plot(Tst,EL_target(1:end-1)*100,'--k')
+    plot(Tst,EL_up(1:end-1)*100,'--g')
+    plot(Tst,EL_down(1:end-1)*100,'--y')
+    legend('% power [-]','% energy [-]')
+    title(sprintf('Deadband = %0.2f, cycles = %0.2f', [deadband(ii), cycl_num(ii)]))
+    hold off
 end
-%delete(fwait)
-plot(deadband, cycl_num)
-%
+
+%% EVALUATION PLOT
+figure()
+title('Evaluation performances')
+xlabel('Deadband')
+legend
+hold on
+
+yyaxis left
+plot(deadband, cycl_num, 'k', DisplayName='Battery cycles', LineWidth=1)
+
+yyaxis right
+plot(deadband, seconds_E_full, '-r', DisplayName='Seconds E full', LineWidth=1)
+plot(deadband, seconds_E_empty, '-b', DisplayName='Seconds E empty', LineWidth=1)
+
+%% OLD PLOTS
 % %% PLOTS
 % % 2 main subplots: power&energy, frequency
 % figure(1)
