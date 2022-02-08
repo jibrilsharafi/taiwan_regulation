@@ -1,4 +1,56 @@
-function [E, P_AC] = simulationEdReg(deadband, E_max, EL_target_0)
+function [E, P_AC] = simulationEdReg(f, Pps_AC, OpMode, E_max, P_nominal, eta, EL_target_0, deadband)
+    %% USEFUL VARIABLES
+    T = length(f);  % number of seonds (=timesteps)
+    dt=1/3600;      % s -> h
+    %% OPERATION MODE       
+    % Different operation ranges given by TSO
+    if strcmp(OpMode,"dReg0.25")
+        % dReg 0.25 parameters
+        % Map of prescribed response
+        upcurve=[100 100 52 9 9 -52 -100 -100];
+        lowcurve=[100 100 52 -9 -9 -52 -100 -100];
+        freq=[59 59.75 59.86 59.98 60.02 60.14 60.25 61];
+    else
+        % dReg 0.5 parameters (valid also for EdReg)
+        % Map of prescribed response
+        % First and last values will be cut when plotting otherwise not right
+        % shape
+        upcurve=[100 100 48 9 9 -48 -100 -100];
+        lowcurve=[100 100 48 -9 -9 -48 -100 -100];
+        freq=[59 59.5 59.75 59.98 60.02 60.25 60.5 61];
+    end
+    
+    % Creating the curves that describe the upper and lower bound of the FR.
+    % This means that (eg) if it is charging (negative power), the response
+    % will be a point (depending on the frequency, that's why interp1) on the
+    % lower curve Discharge-oriented response
+    dchResponse = interp1(freq, upcurve, f) * P_nominal / 100;
+    % Charge-oriented response
+    chResponse = interp1(freq, lowcurve, f) * P_nominal / 100;
+    
+    %% ZERO RESPONSE ARRAY
+    % Creating zero response
+    % First, we check the positions where NOT both the charging curve and
+    % discharging curve (given by operation area upper and lower boundaries)
+    % are positive or negative, meaning we only get the middle part with 0%
+    % power
+    noRespFlag = sign(dchResponse.*chResponse) == -1;
+    % We create this array of infinite values as later we will use the min
+    % function. The values which will be 0 will be substituted with 0 in the
+    % array, the rest stays infinite
+    noRespSet = inf(T,1);
+    % The values which could actually be 0 power are substituted in
+    noRespSet(noRespFlag) = 0;
+    % This variable represents the zero power when it is possible, e.g. when
+    % the upper bound and the lower bound are one positive and one negative,
+    % while it has an inf value when upper and lower bound have the same sign
+    % (both above or below the zero power). This ensures that we can choose the
+    % best approach (zero power) when we can, while still following the
+    % constraints.
+    zeroResponse = min(abs([dchResponse'; chResponse'; noRespSet'])) .* sign(60-f');
+    % Lowest allowed response (closest to 0% power, to achieve less usage)
+    
+    %% CREATING EMPTY ARRAYS
     E = nan(1,T+1);
     EL_target = nan(1,T+1);
     EL_up = nan(1,T+1);
@@ -17,11 +69,13 @@ function [E, P_AC] = simulationEdReg(deadband, E_max, EL_target_0)
     hFlag = nan(1,T+1)';
     hFlag(1) = 0;
     
+    %% INITIALISING SOME VALUES
     E(1) = E_max * 0.5;        % Starting SOC: 50%
     EL_target(1) = EL_target_0;
-    EL_up(1) = EL_target_0 + deadband(ii);
-    EL_down(1) = EL_target_0 - deadband(ii);
+    EL_up(1) = EL_target_0 + deadband;
+    EL_down(1) = EL_target_0 - deadband;
     
+    %% MAIN LOOP
     for t = 1:T
         % Adjusting reference level for AFR SoC management based on the
         % integration of the peak shaving setpoint (hysteresis follows the
