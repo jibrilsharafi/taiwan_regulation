@@ -112,6 +112,7 @@ for ii = 1:steps
     P_SOC_PS_AC = nan(1,T);
     P_DC = nan(1,T);
     P_target_AC = nan(1,T);
+    EL = nan(1, T);
 
     % DISPATCH SIMULATION
     % hflag signals if the target power request (energy) is above, below or
@@ -123,6 +124,8 @@ for ii = 1:steps
     EL_target(1) = EL_target_0;
     EL_up(1) = EL_target_0 + deadband(ii);
     EL_down(1) = EL_target_0 - deadband(ii);
+    EL(1) = E(1)/E_max;
+
     for t = 1:T
         % Adjusting reference level for AFR SoC management based on the
         % integration of the peak shaving setpoint (hysteresis follows the
@@ -154,9 +157,19 @@ for ii = 1:steps
                 P_SOC_managment_AC(t) = dchResponse(t) - zeroResponse(t);
             end
         elseif hFlag(t) == 1       % Force the upper part of the operational curve
-            P_target_AFR_AC(t) = dchResponse(t);
+            if abs(dchResponse(t) * (1 - EL(t))) > zeroResponse(t)
+                P_target_AFR_AC(t) = zeroResponse(t);
+            else
+                P_target_AFR_AC(t) = dchResponse(t) * (1 - EL(t));
+            end
+            %P_target_AFR_AC(t) = max(abs(dchResponse(t) * (1 - EL(t))), zeroResponse(t));
         elseif hFlag(t) == -1      % Force the lower part of the operational curve
-            P_target_AFR_AC(t) = chResponse(t);
+            if abs(chResponse(t) * (1 - EL(t))) > zeroResponse(t)
+                P_target_AFR_AC(t) = zeroResponse(t);
+            else
+                P_target_AFR_AC(t) = chResponse(t) * (1 - EL(t));
+            end
+            %P_target_AFR_AC(t) = min(abs(chResponse(t) * (1 - EL(t))), zeroResponse(t));
         end
 
         % Now we calculate the single DC components, then we sum them. This
@@ -172,6 +185,7 @@ for ii = 1:steps
         % Calculation of energy and energy target for next loop
         E(t+1) = E(t) - max(P_AC(t)/eta, P_AC(t)*eta) * dt;
         EL_target(t+1) = EL_target(t) - P_DC(t) * dt / E_max;
+        EL(t+1) = E(t)/E_max;
 
         % Depending on the energy level, hFlag decides what to do next loop
         if ((E(t+1)/E_max) > EL_up(t)) && (Pps_AC(t) <= 0)
